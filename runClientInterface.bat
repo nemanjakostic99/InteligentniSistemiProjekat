@@ -1,1 +1,1 @@
-streamlit run App.ClientInterface.main
+streamlit run ./App/main.py
