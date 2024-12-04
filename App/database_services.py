@@ -19,11 +19,10 @@ class LockDB:
         self.index = None
         self.id_map = {}  # Maps Faiss IDs to person IDs
         self.feature_dimension = 4096  # Dimension of the face feature vectors (VGG-Face produces 512-dimensional vectors)
-        
+
+        self.init_db()
         # Load existing feature vectors from the database into the Faiss index
         self.load_existing_vectors()
-        
-        self.init_db()
 
     def init_db(self):
         # Creating tables if they do not exist (already implemented)
@@ -44,10 +43,14 @@ class LockDB:
                 id INT PRIMARY KEY IDENTITY(1,1),
                 label NVARCHAR(255) NOT NULL,
                 description NVARCHAR(255),
-                permitted BIT
             )
         ''')
 
+        self.cursor.execute(''' 
+            IF NOT EXISTS (SELECT * FROM entrances WHERE label='main entrance')
+            INSERT INTO entrances (label, description)
+                VALUES ('main entrance', 'main entrance of the building')
+        ''')
         self.cursor.execute(''' 
             IF NOT EXISTS (SELECT * FROM sysobjects WHERE name='attendance' AND xtype='U')
             CREATE TABLE attendance (
@@ -60,13 +63,36 @@ class LockDB:
         ''')
 
         self.cursor.execute(''' 
+            IF NOT EXISTS (SELECT * FROM sysobjects WHERE name='permissions' AND xtype='U')
+            CREATE TABLE permissions (
+                id INT PRIMARY KEY IDENTITY(1,1),
+                label NVARCHAR(255) NOT NULL,
+                description NVARCHAR(255),
+            )
+        ''')
+
+        self.cursor.execute(''' 
+            IF NOT EXISTS (SELECT * FROM permissions WHERE label='allowed')
+            INSERT INTO permissions (label, description)
+                VALUES ('allowed', 'allowed to enter')
+        ''')
+
+        self.cursor.execute(''' 
+            IF NOT EXISTS (SELECT * FROM permissions WHERE label='not allowed')
+            INSERT INTO permissions (label, description)
+                VALUES ('not allowed', 'not allowed to enter')
+        ''')
+
+        self.cursor.execute(''' 
             IF NOT EXISTS (SELECT * FROM sysobjects WHERE name='entrances_permissions' AND xtype='U')
             CREATE TABLE entrances_permissions (
                 id INT PRIMARY KEY IDENTITY(1,1),
                 person_id INT,
                 entrance_id INT,
+                permission_id INT,
                 FOREIGN KEY (person_id) REFERENCES persons(id),
-                FOREIGN KEY (entrance_id) REFERENCES entrances(id)
+                FOREIGN KEY (entrance_id) REFERENCES entrances(id),
+                FOREIGN KEY (permission_id) REFERENCES permissions(id)
             )
         ''')
 
@@ -101,8 +127,8 @@ class LockDB:
         vectors = np.vstack(vectors).astype('float32')  # Stack the vectors to create a (n, d) matrix
 
         # Log the vector and index dimensions
-        st.info(f"Feature vectors shape: {vectors.shape}")
-        st.info(f"Initializing Faiss index with dimension: {self.feature_dimension}")
+        # st.info(f"Feature vectors shape: {vectors.shape}")
+        # st.info(f"Initializing Faiss index with dimension: {self.feature_dimension}")
 
         # Initialize the Faiss index
         self.index = faiss.IndexFlatL2(self.feature_dimension)
@@ -113,15 +139,24 @@ class LockDB:
         else:
             st.error(f"Cannot add vectors to Faiss index. Expected dimension {self.feature_dimension}, got {vectors.shape[1]}.")
 
-    def insert_person(self, name, face_feature_vector, person_image):
+    def insert_person(self, name, face_feature_vector, person_image, entrance_id, permission_id):
         """
         Insert a new person into the database and the Faiss index.
         """
         # Save the feature vector and insert the person into the database
         self.cursor.execute('''INSERT INTO persons (name, person_image, face_feature_vector)
+                               OUTPUT INSERTED.id
                                VALUES (?, ?, ?)''', (name, person_image, pickle.dumps(face_feature_vector)))
+
+
+        person_id = self.cursor.fetchone()[0]
+
         self.conn.commit()
 
+        if entrance_id and permission_id:
+            self.cursor.execute('''INSERT INTO entrances_permissions (person_id, entrance_id, permission_id)
+                                           VALUES (?, ?, ?)''', (person_id, entrance_id, permission_id))
+        self.conn.commit()
         # Insert the vector into the Faiss index
         faiss_index = len(self.id_map)  # Generate a new index for Faiss
         self.id_map[faiss_index] = name  # Store the person name using the Faiss index
@@ -146,9 +181,81 @@ class LockDB:
         
         if indices[0][0] != -1:
             person_id = self.id_map[indices[0][0]]
-            return {"id": person_id, "name": self.id_map[indices[0][0]], "distance": distances[0][0]}
+            similarity = (1 - (distances[0][0] / 2)) * 100
+            self.cursor.execute('''
+                   SELECT p.label, per.name 
+                   FROM permissions p
+                   INNER JOIN entrances_permissions ep ON ep.permission_id = p.id
+                   INNER JOIN entrances e on e.id = ep.entrance_id
+                   INNER JOIN persons per on per.id = ep.person_id
+                   WHERE ep.person_id = ? AND e.label = ?
+               ''', (person_id, "main entrance")) # TODO: hardcoded to main entrance for now, need to update it
+
+            permission_label, person_name = self.cursor.fetchone()
+
+            self.conn.commit()
+            # permission_label = permission_label[0] if permission_label else None
+
+            return {
+                "id": person_id,
+                "name": person_name,
+                "distance": distances[0][0],
+                "similarity": similarity,
+                "permission": permission_label
+            }
         else:
             return None
+
+    def insert_entrance(self, label, description):
+        """
+        Insert a new entrance into the database.
+        """
+        self.cursor.execute('''INSERT INTO entrances (label, description)
+                               VALUES (?, ?)''', (label, description))
+        self.cursor.execute("SELECT SCOPE_IDENTITY()")
+        entrance_id = self.cursor.fetchone()[0]
+        self.conn.commit()
+
+        return entrance_id
+
+    def get_entrances(self):
+        """
+        Get all entrances.
+        """
+        self.cursor.execute("SELECT id, label, description FROM entrances")
+        entrances = [{"id": row[0], "label": row[1], "description": row[2]} for row in self.cursor.fetchall()]
+
+        return entrances
+
+    def insert_permission(self, label, description):
+        """
+        Insert a new permission into the database.
+        """
+        self.cursor.execute('''INSERT INTO permissions (label, description)
+                               VALUES (?, ?)''', (label, description))
+        self.cursor.execute("SELECT SCOPE_IDENTITY()")
+        permission_id = self.cursor.fetchone()[0]
+        self.conn.commit()
+
+        return permission_id
+
+    def get_permissions(self):
+        """
+        Get all permissions.
+        """
+        self.cursor.execute("SELECT id, label, description FROM permissions")
+        permissions = [{"id": row[0], "label": row[1], "description": row[2]} for row in self.cursor.fetchall()]
+
+        return permissions
+
+    def update_permission(self, permission_id, label, description):
+        """
+        Update an existing permission.
+        """
+        self.cursor.execute('''UPDATE permissions
+                               SET label = ?, description = ?
+                               WHERE id = ?''', (label, description, permission_id))
+        self.conn.commit()
 
     def close_connection(self):
         # Close the database connection
