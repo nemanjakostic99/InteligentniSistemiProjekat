@@ -1,0 +1,17 @@
+sqllocaldb create looklock_database
+
+sqllocaldb start looklock_database
+
+sqlcmd -S (localdb)\looklock_database
+
+CREATE DATABASE looklock_database;
+GO
+
+USE looklock_database;
+GO
+CREATE LOGIN my_user WITH PASSWORD = '12345';
+GO
+CREATE USER my_user FOR LOGIN my_user;
+GO
+ALTER ROLE db_owner ADD MEMBER my_user;
+GO
