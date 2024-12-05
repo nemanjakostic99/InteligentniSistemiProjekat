@@ -163,7 +163,7 @@ class LockDB:
         feature_vector = np.array(face_feature_vector).astype('float32').reshape(1, -1)  # Reshape to 2D array
         self.index.add(feature_vector)  # Add to Faiss index
 
-    def find_most_similar_person(self, query_vector, k=1, threshold=0.6):
+    def find_most_similar_person(self, query_vector, entrance_label, k=1, threshold=0.6):
         """
         Find the most similar person based on facial feature similarity.
         """
@@ -182,6 +182,18 @@ class LockDB:
         if indices[0][0] != -1:
             person_id = self.id_map[indices[0][0]]
             similarity = (1 - (distances[0][0] / 2)) * 100
+
+            self.cursor.execute('''
+                               SELECT * 
+                               FROM persons p
+                               WHERE id = ? 
+                           ''', person_id)
+
+            person = self.cursor.fetchone()
+
+            if person is None:
+                return None  # No matching rows found
+
             self.cursor.execute('''
                    SELECT p.label, per.name 
                    FROM permissions p
@@ -189,16 +201,22 @@ class LockDB:
                    INNER JOIN entrances e on e.id = ep.entrance_id
                    INNER JOIN persons per on per.id = ep.person_id
                    WHERE ep.person_id = ? AND e.label = ?
-               ''', (person_id, "main entrance")) # TODO: hardcoded to main entrance for now, need to update it
+               ''', (person_id, entrance_label))
 
-            permission_label, person_name = self.cursor.fetchone()
+            result = self.cursor.fetchone()
+
+            if result is not None:
+                permission_label, person_name = result
+            if result is None:
+                permission_label = "not allowed"
+
 
             self.conn.commit()
             # permission_label = permission_label[0] if permission_label else None
 
             return {
                 "id": person_id,
-                "name": person_name,
+                "name": person.name,
                 "distance": distances[0][0],
                 "similarity": similarity,
                 "permission": permission_label

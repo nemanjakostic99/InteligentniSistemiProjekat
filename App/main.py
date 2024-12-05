@@ -1,3 +1,4 @@
+import os
 import time
 
 import streamlit as st
@@ -20,6 +21,9 @@ def load_deepface_model():
 
 
 deepface_model = load_deepface_model()
+
+selected_entrance_label = None
+
 
 
 # Function to extract feature vector with handle for no face detection
@@ -63,7 +67,7 @@ result_data = {
 
 
 def process_frame():
-    global frame_queue
+    global frame_queue, selected_entrance_id
 
     while camera_active:
         if not frame_queue.empty():
@@ -77,7 +81,7 @@ def process_frame():
                 feature_vector = extract_feature_vector(frame_rgb)
 
                 # Find the nearest match in the database
-                lookALikePerson = db.find_most_similar_person(feature_vector)
+                lookALikePerson = db.find_most_similar_person(feature_vector, selected_entrance_label)
 
                 if lookALikePerson:
                     # Match found, retrieve person details from the database
@@ -123,20 +127,43 @@ def process_frame():
 def log_to_file(log_message):
     today_date = datetime.datetime.now().strftime("%d-%m-%Y")
     log_filename = f"./App/logs/{today_date}.txt"
+
+    log_dir = os.path.dirname(log_filename)
+    if log_dir and not os.path.exists(log_dir):
+        os.makedirs(log_dir, exist_ok=True)
+
     with open(log_filename, "a") as log_file:
         log_file.write(f"{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')} - {log_message}\n")
 
-
 def CameraPage():
     st.header("Live Face Recognition")
-    global camera_active
+    global camera_active, selected_entrance_label
+
+    # Fetch entrances from the database
+    entrances = db.get_entrances()
+    if not entrances:
+        st.error("No entrances found in the database. Please add entrances first.")
+        return
+
+    #Let the user select an entrance
+    selected_entrance = st.selectbox(
+        "Select the Entrance this Camera is Guarding",
+        options=entrances,
+        format_func=lambda x: x['label'])  # Display a user-friendly label
+
+
+    selected_entrance_label = selected_entrance['label']
 
     camera_active = st.checkbox("Activate Camera", value=False)
 
     results = deque(maxlen=5)
 
+    if not selected_entrance:
+        st.warning("Please select an entrance before activating the camera.")
+        return
+
     if camera_active:
-        st.info("Camera is active. Detecting faces automatically every 2 seconds...")
+        st.info(f"Camera is active. Guarding entrance: {selected_entrance['label']}")
 
         processing_thread = Thread(target=process_frame, daemon=True)
         processing_thread.start()
@@ -186,6 +213,83 @@ def CameraPage():
 
         video_capture.release()  # Release the camera when done
 
+# def CameraPage():
+#     st.header("Live Face Recognition")
+#     global camera_active, selected_entrance_id
+#
+#     # Fetch entrances from the database
+#     entrances = db.get_entrances()
+#     if not entrances:
+#         st.error("No entrances found in the database. Please add entrances first.")
+#         return
+#
+#     # Let the user select an entrance
+#     selected_entrance = st.selectbox(
+#         "Select the Entrance this Camera is Guarding",
+#         options=entrances,
+#         format_func=lambda x: x['label']  # Display a user-friendly label
+#     )
+#
+#     selected_entrance_label = selected_entrance['label']
+#
+#     camera_active = st.checkbox("Activate Camera", value=False)
+#
+#     if not selected_entrance:
+#         st.warning("Please select an entrance before activating the camera.")
+#         return
+#
+#     if camera_active:
+#         st.info(f"Camera is active. Guarding entrance: {selected_entrance['label']}")
+#
+#         # Start the frame processing thread
+#         processing_thread = Thread(target=process_frame, daemon=True)
+#         processing_thread.start()
+#
+#         video_capture = cv2.VideoCapture(0)  # Open the default camera
+#
+#         # Placeholder for displaying the camera feed
+#         image_placeholder = st.empty()
+#
+#         with st.container():
+#             while camera_active:
+#                 ret, frame = video_capture.read()
+#
+#                 if not ret:
+#                     st.error("Error accessing the camera. Please make sure it's connected.")
+#                     break
+#
+#                 # Display the live camera feed
+#                 image_placeholder.image(frame, channels="BGR", caption="Live Camera Feed", width=700)
+#
+#                 # Pass the frame for processing
+#                 if frame_queue.empty():
+#                     frame_queue.put(frame)
+#
+#                     if result_data["processed"]:
+#                         if result_data["person_name"]:
+#                             st.subheader(f"Match Found: {result_data['person_name']}")
+#                             st.image(result_data["person_image"], caption=f"ID: {result_data['person_id']}", width=100)
+#                             st.write(f"**ID:** {result_data['person_id']}")
+#                             st.write(f"**Distance:** {result_data['person_distance']:.4f}")
+#                             st.write(f"**Similarity:** {result_data['person_similarity']:.2f}%")
+#
+#                             if result_data['person_permission']:
+#                                 if result_data['person_permission'] == 'allowed':
+#                                     st.write(f"**Permission:** :green[{result_data['person_permission']}]")
+#                                 else:
+#                                     st.write(f"**Permission:** :red[{result_data['person_permission']}]")
+#
+#                             log_to_file(
+#                                 f"Match Found: {result_data['person_name']} (ID: {result_data['person_id']}, "
+#                                 f"Entrance: {selected_entrance['label']}, "
+#                                 f"Permission: {result_data['person_permission']}, "
+#                                 f"Similarity: {result_data['person_similarity']:.2f}%)"
+#                             )
+#                         else:
+#                             st.warning("No match found in the database.")
+#                             log_to_file(f"No match found at entrance: {selected_entrance['label']}.")
+#
+#         video_capture.release()  # Release the camera when done
 
 def AddPersonPage():
     # Section: Add a New Person
