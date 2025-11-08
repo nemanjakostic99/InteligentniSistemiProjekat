@@ -18,13 +18,19 @@ from collections import deque
 @st.cache_resource
 def load_deepface_model():
     return DeepFace.build_model("VGG-Face")
+@st.cache_resource
+def get_database():
+    return LockDB()
 
+db = get_database()
 
 deepface_model = load_deepface_model()
 
 selected_entrance_label = None
 
-
+st.set_page_config(
+    layout="wide"
+)
 
 # Function to extract feature vector with handle for no face detection
 def extract_feature_vector(image_path, model_name='VGG-Face'):
@@ -44,12 +50,7 @@ def extract_feature_vector(image_path, model_name='VGG-Face'):
     except Exception as e:
         raise ValueError(f"Error extracting feature vector: {e}")
 
-
-# Initialize database connection
-db = LockDB()
-
-# Streamlit UI Title
-st.title("Look Lock")
+st.markdown("#### Look Lock")
 
 # Section: Live Camera Face Recognition
 camera_active = False
@@ -135,8 +136,9 @@ def log_to_file(log_message):
     with open(log_filename, "a") as log_file:
         log_file.write(f"{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')} - {log_message}\n")
 
+
 def CameraPage():
-    st.header("Live Face Recognition")
+    # st.markdown("#### Live Face Recognition")
     global camera_active, selected_entrance_label
 
     # Fetch entrances from the database
@@ -145,73 +147,110 @@ def CameraPage():
         st.error("No entrances found in the database. Please add entrances first.")
         return
 
-    #Let the user select an entrance
+    # Let the user select an entrance
     selected_entrance = st.selectbox(
         "Select the Entrance this Camera is Guarding",
         options=entrances,
-        format_func=lambda x: x['label'])  # Display a user-friendly label
-
+        format_func=lambda x: x['label'])
 
     selected_entrance_label = selected_entrance['label']
 
     camera_active = st.checkbox("Activate Camera", value=False)
 
-    results = deque(maxlen=5)
+    if 'results' not in st.session_state:
+        st.session_state.results = deque(maxlen=5)
 
     if not selected_entrance:
         st.warning("Please select an entrance before activating the camera.")
         return
 
     if camera_active:
-        st.info(f"Camera is active. Guarding entrance: {selected_entrance['label']}")
+        # st.info(f"Camera is active. Guarding entrance: {selected_entrance['label']}")
+        st.session_state.results = deque(maxlen=5)
 
         processing_thread = Thread(target=process_frame, daemon=True)
         processing_thread.start()
 
-        video_capture = cv2.VideoCapture(0)  # Open default camera
+        video_capture = cv2.VideoCapture(0)
 
-        # Create a placeholder for displaying camera image
-        image_placeholder = st.empty()
-        placeholder = st.empty()
-        content = []
-        with st.container(height=500):
-            while camera_active:
-                ret, frame = video_capture.read()
+        # Create two columns: camera on left (60%), results on right (40%)
+        col_camera, col_results = st.columns([3, 2])
 
-                if not ret:
-                    st.error("Error accessing the camera. Please make sure it's connected.")
-                    break
+        with col_camera:
+            st.markdown("Live Feed")
+            image_placeholder = st.empty()
 
-                # Update the image in the placeholder to replace the old one
-                image_placeholder.image(frame, channels="BGR", caption="Live Camera Feed", width=700)
-                global frame_queue
-                if frame_queue.empty():
-                    frame_queue.put(frame)
+        with col_results:
+            st.markdown("Recent Results")
+            results_placeholder = st.empty()
 
-                    if result_data["processed"]:
+        while camera_active:
+            ret, frame = video_capture.read()
 
-                        if result_data["person_name"]:
-                            st.subheader(f"Match Found: {result_data['person_name']}")
-                            st.image(result_data["person_image"], caption=f"ID: {result_data['person_id']}", width=100)
-                            st.write(f"**ID:** {result_data['person_id']}")
-                            st.write(f"**Distance:** {result_data['person_distance']:.4f}")
-                            st.write(f"**Similarity:** {result_data['person_similarity']:.2f}%")
+            if not ret:
+                st.error("Error accessing the camera. Please make sure it's connected.")
+                break
 
-                            if result_data['person_permission']:
-                                if result_data['person_permission'] == 'allowed':
-                                    st.write(f"**Permission**: :green[{result_data['person_permission']}]")
-                                else:
-                                    st.write(f"**Permission**: :red[{result_data['person_permission']}]")
+            # Update camera feed
+            image_placeholder.image(frame, channels="BGR", use_container_width=True)
 
-                            log_to_file(f"Match Found: {result_data['person_name']} (ID: {result_data['person_id']}, "
-                                        f"Permission: {result_data['person_permission']}, "
-                                        f"Similarity: {result_data['person_similarity']:.2f}%)")
+            global frame_queue
+            if frame_queue.empty():
+                frame_queue.put(frame)
 
+            # Check for processed results and update display
+            if result_data["processed"]:
+                timestamp = datetime.datetime.now().strftime("%H:%M:%S")
+
+                if result_data["person_name"]:
+                    result_entry = {
+                        "timestamp": timestamp,
+                        "type": "match",
+                        "name": result_data['person_name'],
+                        "id": result_data['person_id'],
+                        "image": result_data["person_image"],
+                        "distance": result_data['person_distance'],
+                        "similarity": result_data['person_similarity'],
+                        "permission": result_data['person_permission']
+                    }
+
+                    log_to_file(f"Match Found: {result_data['person_name']} (ID: {result_data['person_id']}, "
+                                f"Permission: {result_data['person_permission']}, "
+                                f"Similarity: {result_data['person_similarity']:.2f}%)")
+                else:
+                    result_entry = {
+                        "timestamp": timestamp,
+                        "type": "no_match"
+                    }
+                    log_to_file("No match found.")
+
+                st.session_state.results.appendleft(result_entry)
+                result_data["processed"] = False
+
+            with results_placeholder.container():
+                if st.session_state.results:
+                    for idx, result in enumerate(st.session_state.results):
+
+                        if result["type"] == "match":
+                            col_img, col_info = st.columns([1, 2])
+
+                            with col_img:
+                                st.image(result["image"], width=100)
+
+                            with col_info:
+                                st.markdown(f"**{result['timestamp']} {result['name']}**")
+                                st.caption(f"Similarity: {result['similarity']:.1f}%")
+
+                                if result.get('permission') == 'allowed':
+                                    st.success("ALLOWED")
+                                elif result.get('permission'):
+                                    st.error("NOT ALLOWED")
                         else:
-                            st.warning(f"No match found in the database.")
-                            log_to_file("No match found.")
+                            st.warning(f"{result['timestamp']} No match found")
+                else:
+                    st.info("Waiting for recognition results...")
 
-        video_capture.release()  # Release the camera when done
+        video_capture.release()
 
 # def CameraPage():
 #     st.header("Live Face Recognition")
@@ -345,7 +384,7 @@ def Permissions():
     st.header("Add Permission")
     label_input = st.text_input("Enter Label:")
     description_input = st.text_input("Enter Description:")
-    permissions = db.get_permissions()
+
 
     if st.button("Add Permission"):
         if not label_input or not description_input:
@@ -354,33 +393,67 @@ def Permissions():
             try:
                 db.insert_permission(label_input, description_input)
                 st.success(f"Permission added successfully!")
-                permissions = db.get_permissions()
+                st.rerun()
             except Exception as e:
                 st.error(f"Error adding permission: {e}")
+
+    permissions = db.get_permissions()
+    if not permissions:
+        st.info("No permissions available. Add one above to get started.")
+        return
+
+    st.header("Update Permission")
 
     selected_permission = st.selectbox(
         "Select a Permission",
         options=permissions,
-        format_func=lambda x: x['label']
+        format_func=lambda x: x['label'],
+        key="update_select"
     )
-    label_update = st.text_input("Update Label:", value=selected_permission['label'])
-    description_update = st.text_input("Update Description:", value=selected_permission['description'])
-    if st.button("Update Permission"):
-        if not label_update and not description_update:
-            st.error("To delete a permission, use the 'Delete Permission' button")
-        else:
+    if selected_permission:
+        label_update = st.text_input("Update Label:", value=selected_permission['label'])
+        description_update = st.text_input("Update Description:", value=selected_permission['description'])
+        if st.button("Update Permission"):
+            if not label_update or not description_update:
+                st.error("Both label and description are required")
+            else:
+                try:
+                    db.update_permission(selected_permission["id"], label_update, description_update)
+                    st.session_state["update_success"] = True
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Error updating permission: {e}")
+
+    if st.session_state.get("update_success"):
+        st.success("Permission updated!")
+        del st.session_state["update_success"]
+
+    st.header("Delete Permission")
+
+    permission_to_delete = st.selectbox(
+        "Select a Permission",
+        options=permissions,
+        format_func=lambda x: x['label'],
+        key="delete_select"
+    )
+    if permission_to_delete:
+        if st.button("Delete Permission", type="primary"):
             try:
-                db.update_permission(selected_permission["id"], label_update,description_update)
-                st.success(f"Permission updated successfully!")
+                db.delete_permission(permission_to_delete["id"])
+                st.session_state["delete_success"] = True
+                st.rerun()
             except Exception as e:
-                st.error(f"Error updating permission: {e}")
+                st.error(f"Error deleting permission: {e}")
+
+    if st.session_state.get("delete_success"):
+        st.success("Permission deleted!")
+        del st.session_state["delete_success"]
 
 
-pg = st.navigation([
+pg = st.navigation(pages=[
     st.Page(CameraPage, title="Camera Feed"),
     st.Page(AddPersonPage, title="Add Person"),
-    st.Page(Permissions, title="Permissions")
-])
+    st.Page(Permissions, title="Permissions")],
+    position="top")
 pg.run()
 
-db.close_connection()

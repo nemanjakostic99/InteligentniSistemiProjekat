@@ -275,6 +275,16 @@ class LockDB:
                                WHERE id = ?''', (label, description, permission_id))
         self.conn.commit()
 
+    def delete_permission(self, permission_id):
+        """
+        Delete a permission and all related entrance_permission records.
+        """
+        self.cursor.execute('DELETE FROM entrances_permissions WHERE permission_id = ?', (permission_id,))
+        self.cursor.execute('DELETE FROM permissions WHERE id = ?', (permission_id,))
+        self.conn.commit()
+
+        return self.cursor.rowcount
+
     def close_connection(self):
         # Close the database connection
         self.conn.close()
